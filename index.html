@@ -1,0 +1,974 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>reUse - Conectando Pessoas, Resíduos e Soluções Sustentáveis</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 p-4 md:p-8">
+    <div class="max-w-4xl mx-auto">
+        <header class="bg-white p-6 rounded-lg shadow-md mb-8 flex justify-between items-center flex-wrap">
+            <h1 class="text-3xl font-bold text-green-600">reUse</h1>
+            <div class="text-sm text-gray-500 mt-2 md:mt-0 text-right flex items-center space-x-4" id="header-user-info">
+                <!-- Conteúdo do usuário será inserido aqui pelo JavaScript -->
+            </div>
+        </header>
+
+        <div class="relative">
+            <div id="message-container" class="absolute top-0 right-0 left-0 bg-green-500 text-white text-center p-3 rounded-lg shadow-lg transition-opacity duration-500 hidden opacity-0 z-50"></div>
+        </div>
+
+        <div id="app-container">
+            <!-- As diferentes interfaces do aplicativo serão renderizadas aqui -->
+        </div>
+
+        <!-- Modais -->
+        <div id="modal-container"></div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, doc, setDoc, getDoc, Timestamp, updateDoc, deleteDoc, query, orderBy, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Inicialização do Firebase e variáveis globais
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        let userId = null;
+        let userType = null;
+        let points = 0;
+        let carbonSaved = 0;
+        let materials = [];
+        let materialPointsConfig = {};
+        let usersWithPoints = [];
+        let rewards = [];
+        let isAuthReady = false;
+        let isRegistering = false;
+        let activeChat = null;
+        let chatMessages = [];
+        let unsubscribeChat = null;
+        let unsubscribeMaterials = null;
+        let unsubscribeMaterialPoints = null;
+        let unsubscribeUsers = null;
+        let unsubscribeRewards = null;
+        
+        const CORRECT_ADMIN_PASSWORD = '12345678';
+
+        const setupListeners = () => {
+            if (unsubscribeMaterials) unsubscribeMaterials();
+            if (unsubscribeMaterialPoints) unsubscribeMaterialPoints();
+            if (unsubscribeUsers) unsubscribeUsers();
+            if (unsubscribeRewards) unsubscribeRewards();
+
+            unsubscribeMaterials = onSnapshot(collection(db, `artifacts/${appId}/public/data/materials`), (snapshot) => {
+                materials = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderApp();
+            });
+
+            unsubscribeMaterialPoints = onSnapshot(collection(db, `artifacts/${appId}/public/data/materialPoints`), (snapshot) => {
+                materialPointsConfig = {};
+                snapshot.docs.forEach(doc => {
+                    materialPointsConfig[doc.id] = doc.data();
+                });
+                renderApp();
+            });
+
+            unsubscribeUsers = onSnapshot(collection(db, `artifacts/${appId}/public/data/userSummaries`), (snapshot) => {
+                usersWithPoints = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderApp();
+            });
+
+            unsubscribeRewards = onSnapshot(collection(db, `artifacts/${appId}/public/data/rewards`), (snapshot) => {
+                rewards = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderApp();
+            });
+        };
+
+        window.showMessage = (msg, type = 'success') => {
+            const messageContainer = document.getElementById('message-container');
+            if (messageContainer) {
+                messageContainer.textContent = msg;
+                messageContainer.classList.remove('hidden', 'opacity-0', 'bg-red-500', 'bg-green-500');
+                messageContainer.classList.add(type === 'error' ? 'bg-red-500' : 'bg-green-500', 'opacity-100');
+                setTimeout(() => {
+                    messageContainer.classList.remove('opacity-100');
+                    messageContainer.classList.add('opacity-0');
+                    setTimeout(() => {
+                        messageContainer.classList.add('hidden');
+                    }, 500);
+                }, 3000);
+            }
+        };
+
+        window.renderHeader = () => {
+            const headerUserInfo = document.getElementById('header-user-info');
+            if (!headerUserInfo) return;
+            
+            let userDisplayId = userId;
+            if (userId && userId.length > 8 && userType !== 'Admin') {
+                userDisplayId = userId.slice(0, 8) + '...';
+            }
+
+            let content = '';
+            if (userId) {
+                content = `
+                    <div class="space-x-4 flex items-center">
+                        <div>
+                            <span class="block font-bold text-gray-800">Perfil: ${userType}</span>
+                            ${userType !== 'Admin' ? `<span class="block font-semibold">Pontos Sync: <span class="text-green-600">${points}</span></span><span class="block font-semibold">Carbono Salvo: <span class="text-blue-600">${carbonSaved} kg</span></span>` : ''}
+                            <span class="block">ID: ${userDisplayId}</span>
+                        </div>
+                        <button onclick="handleLogout()" class="bg-gray-200 text-red-600 p-3 rounded-lg font-semibold hover:bg-gray-300 transition-colors flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-log-out"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+                            <span>Sair</span>
+                        </button>
+                    </div>
+                `;
+            } else {
+                content = `
+                    <button onclick="showLoginModal()" class="text-blue-600 font-semibold underline hover:text-blue-700 transition-colors">Login</button>
+                    <button onclick="showAdminLoginModal()" class="text-blue-600 font-semibold underline hover:text-blue-700 transition-colors">Admin</button>
+                `;
+            }
+            headerUserInfo.innerHTML = content;
+        };
+
+        window.renderApp = () => {
+            const appContainer = document.getElementById('app-container');
+            if (!appContainer || !isAuthReady) return;
+
+            if (!userId) {
+                renderLoginPage();
+                return;
+            }
+
+            if (userType === 'Admin') {
+                renderAdminPanel();
+                return;
+            }
+            
+            if (userType === 'Coletor') {
+                renderMaterialsFeed();
+                return;
+            }
+
+            if (userType === 'Doador') {
+                renderForm();
+                return;
+            }
+            
+            renderUserTypeSelector();
+        };
+
+        window.handleLogout = async () => {
+            if (userType === 'Admin') {
+                userId = null;
+                userType = null;
+                showMessage("Você foi desconectado.");
+                renderApp();
+            } else {
+                await signOut(auth);
+            }
+            if (unsubscribeChat) unsubscribeChat();
+        };
+
+        window.handleUserLogin = async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const email = form.email.value;
+            const password = form.password.value;
+            try {
+                await signInWithEmailAndPassword(auth, email, password);
+                showMessage('Login realizado com sucesso!');
+            } catch (error) {
+                console.error("Erro de login:", error);
+                showMessage("Erro de login. Verifique seu e-mail e senha.", 'error');
+            }
+        };
+
+        window.handleUserRegister = async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const email = form.email.value;
+            const password = form.password.value;
+            const selectedUserType = form.userType.value;
+            if (!selectedUserType) {
+                showMessage("Por favor, selecione um tipo de perfil.", 'error');
+                return;
+            }
+            try {
+                const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+                const user = userCredential.user;
+                const userProfileRef = doc(db, `artifacts/${appId}/users/${user.uid}/profile`, "data");
+                const userSummaryRef = doc(db, `artifacts/${appId}/public/data/userSummaries`, user.uid);
+                
+                await setDoc(userProfileRef, { userType: selectedUserType, points: 0, carbonSaved: 0 });
+                await setDoc(userSummaryRef, { userType: selectedUserType, points: 0, carbonSaved: 0 });
+                
+                showMessage('Registro realizado com sucesso! Faça login para continuar.');
+                toggleRegister();
+            } catch (error) {
+                console.error("Erro ao registrar:", error);
+                showMessage("Erro ao registrar. Verifique os dados ou tente novamente.", 'error');
+            }
+        };
+        
+        window.handleAdminLogin = async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const password = form.adminPassword.value;
+            if (password === CORRECT_ADMIN_PASSWORD) {
+                userType = 'Admin';
+                userId = 'admin';
+                renderApp();
+                closeModal();
+                showMessage('Login de administrador realizado com sucesso!');
+            } else {
+                showMessage('Senha incorreta.', 'error');
+            }
+        };
+
+        window.handleSetUserType = async (type) => {
+            if (!userId) return;
+            try {
+                const userProfileRef = doc(db, `artifacts/${appId}/users/${userId}/profile`, "data");
+                const userSummaryRef = doc(db, `artifacts/${appId}/public/data/userSummaries`, userId);
+                
+                await setDoc(userProfileRef, { userType: type, points: 0, carbonSaved: 0 }, { merge: true });
+                await setDoc(userSummaryRef, { userType: type, points: 0, carbonSaved: 0 }, { merge: true });
+                
+                userType = type;
+                renderApp();
+                showMessage(`Bem-vindo(a) como ${type}!`);
+            } catch (error) {
+                console.error("Erro ao definir o tipo de usuário:", error);
+                showMessage("Erro ao definir o tipo de usuário. Tente novamente.", 'error');
+            }
+        };
+        
+        window.handlePostMaterial = async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const materialType = form.type.value;
+            const materialInfo = materialPointsConfig[materialType.toLowerCase()] || { points: 5, carbonSavedPerKg: 1 };
+            const quantity = parseFloat(form.quantity.value);
+
+            const newMaterial = {
+                type: materialType,
+                quantity: quantity,
+                location: form.location.value,
+                sku: form.sku.value,
+                value: materialInfo.points * quantity,
+                carbonSaved: materialInfo.carbonSavedPerKg * quantity,
+                userId: userId,
+                timestamp: Timestamp.now(),
+                scheduled: false,
+                scheduledBy: null,
+                confirmed: false
+            };
+            
+            if (!newMaterial.type || !newMaterial.quantity || !newMaterial.location) {
+                showMessage("Por favor, preencha o tipo, quantidade e localização.", 'error');
+                return;
+            }
+            try {
+                const materialsCollectionRef = collection(db, `artifacts/${appId}/public/data/materials`);
+                await addDoc(materialsCollectionRef, newMaterial);
+                showMessage("Material postado com sucesso!");
+                form.reset();
+            } catch (error) {
+                console.error("Erro ao postar material:", error);
+                showMessage("Erro ao postar material. Tente novamente.", 'error');
+            }
+        };
+        
+        window.handleSchedulePickup = async (materialId, doadorId) => {
+            try {
+                const materialRef = doc(db, `artifacts/${appId}/public/data/materials`, materialId);
+                await updateDoc(materialRef, {
+                    scheduled: true,
+                    scheduledBy: userId,
+                });
+                showMessage("Retirada agendada com sucesso! Você pode agora conversar com o doador.");
+                handleOpenChat({id: materialId, doadorId: doadorId, scheduledBy: userId, type: materials.find(m => m.id === materialId)?.type});
+            } catch (error) {
+                console.error("Erro ao agendar retirada:", error);
+                showMessage("Erro ao agendar retirada. Tente novamente.", 'error');
+            }
+        };
+        
+        window.handleConfirmPickup = async (materialId, doadorId, materialType) => {
+            try {
+                const materialRef = doc(db, `artifacts/${appId}/public/data/materials`, materialId);
+                const materialDoc = await getDoc(materialRef);
+                const materialData = materialDoc.data();
+                if (!materialData) {
+                    showMessage("Material não encontrado.", 'error');
+                    return;
+                }
+
+                const pointsToAdd = materialPointsConfig[materialType.toLowerCase()]?.points || 5;
+                const carbonToAdd = materialPointsConfig[materialType.toLowerCase()]?.carbonSavedPerKg || 1;
+                const totalPoints = pointsToAdd * materialData.quantity;
+                const totalCarbon = carbonToAdd * materialData.quantity;
+                
+                const doadorRef = doc(db, `artifacts/${appId}/public/data/userSummaries`, doadorId);
+                const coletorRef = doc(db, `artifacts/${appId}/public/data/userSummaries`, userId);
+                const doadorProfileRef = doc(db, `artifacts/${appId}/users/${doadorId}/profile`, "data");
+                const coletorProfileRef = doc(db, `artifacts/${appId}/users/${userId}/profile`, "data");
+
+                await updateDoc(materialRef, { confirmed: true });
+
+                const doadorSnap = await getDoc(doadorRef);
+                const coletorSnap = await getDoc(coletorRef);
+                
+                const doadorPoints = (doadorSnap.exists() ? doadorSnap.data().points : 0) + (totalPoints / 2);
+                const coletorPoints = (coletorSnap.exists() ? coletorSnap.data().points : 0) + (totalPoints / 2);
+                const doadorCarbon = (doadorSnap.exists() ? doadorSnap.data().carbonSaved : 0) + (totalCarbon / 2);
+                const coletorCarbon = (coletorSnap.exists() ? coletorSnap.data().carbonSaved : 0) + (totalCarbon / 2);
+
+                await updateDoc(doadorRef, { points: doadorPoints, carbonSaved: doadorCarbon });
+                await updateDoc(coletorRef, { points: coletorPoints, carbonSaved: coletorCarbon });
+                await updateDoc(doadorProfileRef, { points: doadorPoints, carbonSaved: doadorCarbon });
+                await updateDoc(coletorProfileRef, { points: coletorPoints, carbonSaved: coletorCarbon });
+
+                showMessage(`Coleta confirmada! Você e o doador receberam ${totalPoints / 2} pontos e salvaram ${totalCarbon / 2} kg de CO2.`);
+
+            } catch (error) {
+                console.error("Erro ao confirmar coleta:", error);
+                showMessage("Erro ao confirmar coleta. Tente novamente.", 'error');
+            }
+        };
+        
+        const setActiveChat = (material) => {
+            activeChat = material;
+            if (unsubscribeChat) unsubscribeChat();
+            const messagesCollectionRef = collection(db, `artifacts/${appId}/public/data/chats/${activeChat.id}/messages`);
+            const messagesQuery = query(messagesCollectionRef, orderBy('timestamp'));
+            unsubscribeChat = onSnapshot(messagesQuery, (snapshot) => {
+                chatMessages = snapshot.docs.map(doc => doc.data());
+                renderChatModal();
+            });
+        };
+
+        window.handleOpenChat = (material) => {
+            setActiveChat(material);
+        };
+
+        window.handleSendMessage = async (e) => {
+            e.preventDefault();
+            const newMessageText = document.getElementById('new-message-text').value;
+            if (!newMessageText.trim() || !activeChat) return;
+
+            try {
+                const messagesCollectionRef = collection(db, `artifacts/${appId}/public/data/chats/${activeChat.id}/messages`);
+                await addDoc(messagesCollectionRef, {
+                    text: newMessageText,
+                    senderId: userId,
+                    timestamp: Timestamp.now(),
+                });
+                document.getElementById('new-message-text').value = '';
+            } catch (error) {
+                console.error("Erro ao enviar mensagem:", error);
+                showMessage("Erro ao enviar mensagem. Tente novamente.", 'error');
+            }
+        };
+        
+        window.handleAddMaterialType = async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const newMaterialType = {
+                name: form.materialName.value,
+                points: parseFloat(form.materialPoints.value),
+                carbonSavedPerKg: parseFloat(form.carbonSavedPerKg.value)
+            };
+            if (!newMaterialType.name || isNaN(newMaterialType.points) || isNaN(newMaterialType.carbonSavedPerKg)) {
+                showMessage("Por favor, preencha todos os campos com valores válidos.", 'error');
+                return;
+            }
+            try {
+                const materialPointsRef = doc(db, `artifacts/${appId}/public/data/materialPoints`, newMaterialType.name.toLowerCase());
+                await setDoc(materialPointsRef, { points: newMaterialType.points, carbonSavedPerKg: newMaterialType.carbonSavedPerKg });
+                showMessage(`Tipo de material "${newMaterialType.name}" adicionado.`);
+                form.reset();
+            } catch (error) {
+                console.error("Erro ao adicionar tipo de material:", error);
+                showMessage("Erro ao adicionar tipo de material. Tente novamente.", 'error');
+            }
+        };
+
+        window.handleDeleteMaterialType = async (name) => {
+            if (!confirm(`Tem certeza de que deseja excluir o tipo de material "${name}"?`)) return;
+            try {
+                const materialPointsRef = doc(db, `artifacts/${appId}/public/data/materialPoints`, name.toLowerCase());
+                await deleteDoc(materialPointsRef);
+                showMessage(`Tipo de material "${name}" removido.`);
+            } catch (error) {
+                console.error("Erro ao deletar tipo de material:", error);
+                showMessage("Erro ao deletar tipo de material. Tente novamente.", 'error');
+            }
+        };
+        
+        window.handleAddReward = async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const newReward = {
+                name: form.rewardName.value,
+                points: parseFloat(form.rewardPoints.value)
+            };
+            if (!newReward.name || isNaN(newReward.points)) {
+                showMessage("Preencha o nome da recompensa e o custo em pontos.", 'error');
+                return;
+            }
+            try {
+                const rewardsCollectionRef = collection(db, `artifacts/${appId}/public/data/rewards`);
+                await addDoc(rewardsCollectionRef, newReward);
+                showMessage(`Recompensa "${newReward.name}" adicionada.`);
+                form.reset();
+            } catch (error) {
+                console.error("Erro ao adicionar recompensa:", error);
+                showMessage("Erro ao adicionar recompensa. Tente novamente.", 'error');
+            }
+        };
+        
+        window.handleDeleteReward = async (rewardId) => {
+            if (!confirm(`Tem certeza de que deseja excluir esta recompensa?`)) return;
+            try {
+                const rewardRef = doc(db, `artifacts/${appId}/public/data/rewards`, rewardId);
+                await deleteDoc(rewardRef);
+                showMessage("Recompensa removida.");
+            } catch (error) {
+                console.error("Erro ao deletar recompensa:", error);
+                showMessage("Erro ao deletar recompensa. Tente novamente.", 'error');
+            }
+        };
+
+        window.handleRedeemReward = async (reward) => {
+            if (points < reward.points) {
+                showMessage("Pontos insuficientes para resgatar esta recompensa.", 'error');
+                return;
+            }
+            if (!confirm(`Você tem certeza que quer resgatar "${reward.name}" por ${reward.points} pontos?`)) return;
+
+            try {
+                const newPoints = points - reward.points;
+                const userProfileRef = doc(db, `artifacts/${appId}/users/${userId}/profile`, "data");
+                const userSummaryRef = doc(db, `artifacts/${appId}/public/data/userSummaries`, userId);
+                
+                await updateDoc(userProfileRef, { points: newPoints });
+                await updateDoc(userSummaryRef, { points: newPoints });
+                
+                showMessage(`Recompensa "${reward.name}" resgatada com sucesso! ${reward.points} pontos foram deduzidos.`);
+            } catch (error) {
+                console.error("Erro ao resgatar recompensa:", error);
+                showMessage("Erro ao resgatar recompensa. Tente novamente.", 'error');
+            }
+        };
+
+        const renderLoginPage = () => {
+            const appContainer = document.getElementById('app-container');
+            if (!appContainer) return;
+            appContainer.innerHTML = `
+                <div class="min-h-screen p-4 md:p-8 flex flex-col items-center justify-center font-sans">
+                    <div class="w-full max-w-sm bg-white p-8 rounded-lg shadow-md text-center">
+                        <h2 class="text-2xl font-bold mb-4 text-green-600">
+                            ${isRegistering ? 'Criar Conta' : 'Login'}
+                        </h2>
+                        <form id="auth-form" class="space-y-4">
+                            ${isRegistering ? `
+                                <input type="email" name="email" placeholder="E-mail" required class="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"/>
+                                <input type="password" name="password" placeholder="Senha" required class="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"/>
+                                <div class="flex flex-col space-y-2">
+                                    <label class="text-sm text-gray-700 text-left">Escolha seu perfil:</label>
+                                    <select name="userType" class="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500">
+                                        <option value="">Selecione...</option>
+                                        <option value="Doador">Doador</option>
+                                        <option value="Coletor">Coletor</option>
+                                    </select>
+                                </div>
+                            ` : `
+                                <input type="email" name="email" placeholder="E-mail" required class="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"/>
+                                <input type="password" name="password" placeholder="Senha" required class="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"/>
+                            `}
+                            <button type="submit" class="w-full bg-green-600 text-white p-3 rounded-lg font-semibold hover:bg-green-700 transition-colors">
+                                ${isRegistering ? 'Registrar' : 'Entrar'}
+                            </button>
+                        </form>
+                        <div class="text-center text-sm mt-4">
+                            <button type="button" onclick="toggleRegister()" class="text-blue-600 hover:text-blue-700 underline transition-colors">
+                                ${isRegistering ? 'Já tem uma conta? Faça Login.' : 'Não tem uma conta? Crie uma.'}
+                            </button>
+                        </div>
+                        <div class="mt-4">
+                            <button onclick="showAdminLoginModal()" class="text-blue-600 font-semibold underline hover:text-blue-700 transition-colors">
+                                Acessar como Admin
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            const authForm = document.getElementById('auth-form');
+            if (authForm) {
+                authForm.addEventListener('submit', isRegistering ? handleUserRegister : handleUserLogin);
+            }
+        };
+
+        const renderForm = () => {
+            const appContainer = document.getElementById('app-container');
+            if (!appContainer) return;
+            const materialOptions = Object.keys(materialPointsConfig).map(type => `<option value="${type}">${type.charAt(0).toUpperCase() + type.slice(1)}</option>`).join('');
+
+            appContainer.innerHTML = `
+                <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                    <h2 class="text-2xl font-bold text-green-600 mb-4">Postar Material para Doação ♻️</h2>
+                    <form id="material-form" class="space-y-4" onsubmit="handlePostMaterial(event)">
+                        <div class="flex flex-col">
+                            <label for="type" class="text-sm font-semibold mb-1">Tipo de Material</label>
+                            <select id="type" name="type" required class="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="">Selecione...</option>
+                                ${materialOptions}
+                            </select>
+                        </div>
+                        <div class="flex flex-col">
+                            <label for="quantity" class="text-sm font-semibold mb-1">Quantidade (kg)</label>
+                            <input type="number" id="quantity" name="quantity" min="1" step="0.1" required class="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"/>
+                        </div>
+                        <div class="flex flex-col">
+                            <label for="location" class="text-sm font-semibold mb-1">Localização</label>
+                            <input type="text" id="location" name="location" placeholder="Ex: Rua A, 123" required class="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"/>
+                        </div>
+                        <button type="submit" class="w-full bg-green-600 text-white p-3 rounded-lg font-semibold hover:bg-green-700 transition-colors">
+                            Postar Doação
+                        </button>
+                    </form>
+                </div>
+                ${renderUserMaterials()}
+                <div class="bg-white p-6 rounded-lg shadow-md mt-8">
+                    <h2 class="text-2xl font-bold text-purple-600 mb-4">Resgatar Recompensas 🎁</h2>
+                    <p class="text-lg font-bold text-center text-purple-600 mb-4">Seus Pontos Sync: ${points}</p>
+                    ${rewards.length === 0 ? `
+                        <p class="text-center text-gray-500">Nenhuma recompensa disponível ainda.</p>
+                    ` : `
+                        <ul class="space-y-2">
+                            ${rewards.map(reward => `
+                                <li class="flex justify-between items-center bg-gray-100 p-4 rounded-lg shadow-md">
+                                    <span class="font-medium text-gray-800">${reward.name}</span>
+                                    <div class="flex items-center space-x-2">
+                                        <span class="font-bold ${points >= reward.points ? 'text-green-600' : 'text-red-600'}">${reward.points} Pontos</span>
+                                        <button onclick="handleRedeemReward({id: '${reward.id}', name: '${reward.name}', points: ${reward.points}})"
+                                                ${points < reward.points ? 'disabled' : ''}
+                                                class="p-2 rounded-lg text-sm font-semibold transition-colors ${points >= reward.points ? 'bg-purple-600 text-white hover:bg-purple-700' : 'bg-gray-400 text-gray-500 cursor-not-allowed'}">
+                                            Resgatar
+                                        </button>
+                                    </div>
+                                </li>
+                            `).join('')}
+                        </ul>
+                    `}
+                </div>
+            `;
+        };
+
+        const renderUserMaterials = () => {
+            const userMaterials = materials.filter(m => m.userId === userId);
+            if (userMaterials.length === 0) {
+                return `<div class="bg-white p-6 rounded-lg shadow-md mt-8"><p class="text-gray-500">Você ainda não postou nenhum material.</p></div>`;
+            }
+            return `
+                <div class="bg-white p-6 rounded-lg shadow-md mt-8">
+                    <h2 class="text-2xl font-bold text-blue-600 mb-4">Suas Doações 📦</h2>
+                    <div class="space-y-4">
+                        ${userMaterials.map(material => `
+                            <div class="p-4 border border-gray-200 rounded-lg shadow-sm ${material.confirmed ? 'bg-green-50' : material.scheduled ? 'bg-yellow-50' : ''}">
+                                <h3 class="font-bold">${material.type}</h3>
+                                <p>Quantidade: ${material.quantity} kg</p>
+                                <p>Local: ${material.location}</p>
+                                <p class="text-sm text-gray-500">Pontos: ${material.value} | Carbono Salvo: ${material.carbonSaved} kg</p>
+                                <div class="mt-2">
+                                    ${material.confirmed ? `
+                                        <span class="text-green-600 font-semibold">Coleta Confirmada! 🎉</span>
+                                    ` : material.scheduled ? `
+                                        <div class="flex items-center space-x-2">
+                                            <span class="text-yellow-600 font-semibold">Agendado com o coletor.</span>
+                                            <button onclick="handleOpenChat({id: '${material.id}', userId: '${material.userId}', scheduledBy: '${material.scheduledBy}', type: '${material.type}'})" class="bg-blue-500 text-white p-2 rounded-lg text-sm hover:bg-blue-600 transition-colors">
+                                                Abrir Chat
+                                            </button>
+                                        </div>
+                                    ` : `
+                                        <span class="text-gray-500">Aguardando coletor...</span>
+                                    `}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        };
+
+        const renderMaterialsFeed = () => {
+            const appContainer = document.getElementById('app-container');
+            if (!appContainer) return;
+            const availableMaterials = materials.filter(m => !m.scheduled && m.userId !== userId);
+            const scheduledMaterials = materials.filter(m => m.scheduledBy === userId && !m.confirmed);
+            const confirmedMaterials = materials.filter(m => m.scheduledBy === userId && m.confirmed);
+
+            appContainer.innerHTML = `
+                <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                    <h2 class="text-2xl font-bold text-blue-600 mb-4">Feed de Materiais Disponíveis 🌍</h2>
+                    <div class="space-y-4">
+                        ${availableMaterials.length === 0 ? `
+                            <p class="text-center text-gray-500">Nenhum material disponível no momento.</p>
+                        ` : `
+                            ${availableMaterials.map(material => `
+                                <div class="p-4 border border-gray-200 rounded-lg shadow-sm">
+                                    <h3 class="font-bold">${material.type}</h3>
+                                    <p>Quantidade: ${material.quantity} kg</p>
+                                    <p>Local: ${material.location}</p>
+                                    <p class="text-sm text-gray-500">Pontos: ${material.value} | Carbono Salvo: ${material.carbonSaved} kg</p>
+                                    <button onclick="handleSchedulePickup('${material.id}', '${material.userId}')" class="mt-2 bg-green-600 text-white p-2 rounded-lg font-semibold hover:bg-green-700 transition-colors">
+                                        Agendar Retirada
+                                    </button>
+                                </div>
+                            `).join('')}
+                        `}
+                    </div>
+                </div>
+                ${scheduledMaterials.length > 0 ? `
+                    <div class="bg-white p-6 rounded-lg shadow-md mt-8">
+                        <h2 class="text-2xl font-bold text-yellow-600 mb-4">Suas Retiradas Agendadas 🚚</h2>
+                        <div class="space-y-4">
+                            ${scheduledMaterials.map(material => `
+                                <div class="p-4 border border-gray-200 rounded-lg shadow-sm bg-yellow-50">
+                                    <h3 class="font-bold">${material.type}</h3>
+                                    <p>Quantidade: ${material.quantity} kg</p>
+                                    <p>Local: ${material.location}</p>
+                                    <p class="text-sm text-gray-500">Coletor ID: ${material.scheduledBy.slice(0, 8)}...</p>
+                                    <div class="flex space-x-2 mt-2">
+                                        <button onclick="handleOpenChat({id: '${material.id}', doadorId: '${material.userId}', scheduledBy: '${material.scheduledBy}', type: '${material.type}'})" class="bg-blue-500 text-white p-2 rounded-lg text-sm hover:bg-blue-600 transition-colors">
+                                            Abrir Chat
+                                        </button>
+                                        <button onclick="handleConfirmPickup('${material.id}', '${material.userId}', '${material.type}')" class="bg-green-600 text-white p-2 rounded-lg text-sm hover:bg-green-700 transition-colors">
+                                            Confirmar Coleta
+                                        </button>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                ` : ''}
+                <div class="bg-white p-6 rounded-lg shadow-md mt-8">
+                    <h2 class="text-2xl font-bold text-purple-600 mb-4">Resgatar Recompensas 🎁</h2>
+                    <p class="text-lg font-bold text-center text-purple-600 mb-4">Seus Pontos Sync: ${points}</p>
+                    ${rewards.length === 0 ? `
+                        <p class="text-center text-gray-500">Nenhuma recompensa disponível ainda.</p>
+                    ` : `
+                        <ul class="space-y-2">
+                            ${rewards.map(reward => `
+                                <li class="flex justify-between items-center bg-gray-100 p-4 rounded-lg shadow-md">
+                                    <span class="font-medium text-gray-800">${reward.name}</span>
+                                    <div class="flex items-center space-x-2">
+                                        <span class="font-bold ${points >= reward.points ? 'text-green-600' : 'text-red-600'}">${reward.points} Pontos</span>
+                                        <button onclick="handleRedeemReward({id: '${reward.id}', name: '${reward.name}', points: ${reward.points}})"
+                                                ${points < reward.points ? 'disabled' : ''}
+                                                class="p-2 rounded-lg text-sm font-semibold transition-colors ${points >= reward.points ? 'bg-purple-600 text-white hover:bg-purple-700' : 'bg-gray-400 text-gray-500 cursor-not-allowed'}">
+                                            Resgatar
+                                        </button>
+                                    </div>
+                                </li>
+                            `).join('')}
+                        </ul>
+                    `}
+                </div>
+            `;
+        };
+
+        const renderAdminPanel = () => {
+            const appContainer = document.getElementById('app-container');
+            if (!appContainer) return;
+            appContainer.innerHTML = `
+                <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                    <h2 class="text-2xl font-bold text-green-600 mb-4">Painel do Administrador ⚙️</h2>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <div>
+                            <h3 class="text-xl font-bold mb-2">Gerenciar Tipos de Materiais</h3>
+                            <form id="add-material-type-form" class="space-y-2 mb-4" onsubmit="handleAddMaterialType(event)">
+                                <input type="text" name="materialName" placeholder="Nome do Material" required class="w-full p-2 border border-gray-300 rounded-lg"/>
+                                <input type="number" name="materialPoints" placeholder="Pontos por kg" required class="w-full p-2 border border-gray-300 rounded-lg"/>
+                                <input type="number" name="carbonSavedPerKg" placeholder="Carbono Salvo por kg" required class="w-full p-2 border border-gray-300 rounded-lg"/>
+                                <button type="submit" class="w-full bg-green-600 text-white p-2 rounded-lg font-semibold hover:bg-green-700">Adicionar Tipo</button>
+                            </form>
+                            <ul class="space-y-2 custom-scrollbar max-h-48 overflow-y-auto">
+                                ${Object.entries(materialPointsConfig).map(([name, config]) => `
+                                    <li class="flex justify-between items-center bg-gray-100 p-3 rounded-lg">
+                                        <div class="flex-grow">
+                                            <span class="font-medium block">${name.charAt(0).toUpperCase() + name.slice(1)}</span>
+                                            <span class="text-sm text-gray-600 block">Pontos: ${config.points} | Carbono: ${config.carbonSavedPerKg} kg</span>
+                                        </div>
+                                        <button onclick="handleDeleteMaterialType('${name}')" class="text-red-500 hover:text-red-700">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-trash-2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+                                        </button>
+                                    </li>
+                                `).join('')}
+                            </ul>
+                        </div>
+                        
+                        <div>
+                            <h3 class="text-xl font-bold mb-2">Gerenciar Recompensas</h3>
+                            <form id="add-reward-form" class="space-y-2 mb-4" onsubmit="handleAddReward(event)">
+                                <input type="text" name="rewardName" placeholder="Nome da Recompensa" required class="w-full p-2 border border-gray-300 rounded-lg"/>
+                                <input type="number" name="rewardPoints" placeholder="Custo em Pontos" required class="w-full p-2 border border-gray-300 rounded-lg"/>
+                                <button type="submit" class="w-full bg-purple-600 text-white p-2 rounded-lg font-semibold hover:bg-purple-700">Adicionar Recompensa</button>
+                            </form>
+                            <ul class="space-y-2 custom-scrollbar max-h-48 overflow-y-auto">
+                                ${rewards.map(reward => `
+                                    <li class="flex justify-between items-center bg-gray-100 p-3 rounded-lg">
+                                        <span class="font-medium">${reward.name}</span>
+                                        <span>${reward.points} Pontos</span>
+                                        <button onclick="handleDeleteReward('${reward.id}')" class="text-red-500 hover:text-red-700">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-trash-2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+                                        </button>
+                                    </li>
+                                `).join('')}
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-8">
+                        <h3 class="text-xl font-bold mb-2">Pontuação dos Usuários</h3>
+                        <ul class="space-y-2 custom-scrollbar max-h-48 overflow-y-auto">
+                            ${usersWithPoints.sort((a,b) => b.points - a.points).map(user => `
+                                <li class="flex justify-between items-center bg-gray-100 p-3 rounded-lg">
+                                    <div class="flex-grow">
+                                        <span class="font-medium block">${user.userType} - ID: ${user.id.slice(0, 8)}...</span>
+                                        <span class="text-sm text-gray-600 block">Pontos: ${user.points} | Carbono Salvo: ${user.carbonSaved} kg</span>
+                                    </div>
+                                </li>
+                            `).join('')}
+                        </ul>
+                    </div>
+                </div>
+            `;
+        };
+
+        window.closeModal = () => {
+            const modal = document.getElementById('admin-login-modal') || document.getElementById('chat-modal');
+            if (modal) {
+                modal.remove();
+                activeChat = null;
+                if (unsubscribeChat) unsubscribeChat();
+            }
+        };
+
+        window.toggleRegister = () => {
+            isRegistering = !isRegistering;
+            renderLoginPage();
+        };
+
+        window.showLoginModal = () => {
+            isRegistering = false;
+            renderLoginPage();
+        };
+
+        window.showAdminLoginModal = () => {
+            const modalContainer = document.getElementById('modal-container');
+            const modal = document.createElement('div');
+            modal.id = 'admin-login-modal';
+            modal.className = 'fixed inset-0 bg-black bg-opacity-70 overflow-y-auto h-full w-full flex items-center justify-center z-50';
+            modal.innerHTML = `
+                <div class="relative p-8 bg-white w-full max-w-sm m-4 rounded-lg shadow-md text-center">
+                    <h2 class="text-2xl font-bold mb-4 text-green-600">Acesso Admin</h2>
+                    <form id="admin-login-form" class="space-y-4">
+                        <input type="password" name="adminPassword" placeholder="Digite a senha" required class="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"/>
+                        <div class="flex justify-between space-x-2 mt-4">
+                            <button type="button" onclick="closeModal()" class="w-1/2 bg-gray-300 text-gray-800 p-3 rounded-lg font-semibold hover:bg-gray-400 transition-colors">
+                                Cancelar
+                            </button>
+                            <button type="submit" class="w-1/2 bg-green-600 text-white p-3 rounded-lg font-semibold hover:bg-green-700 transition-colors">
+                                Entrar
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            `;
+            modalContainer.innerHTML = '';
+            modalContainer.appendChild(modal);
+            document.getElementById('admin-login-form').addEventListener('submit', handleAdminLogin);
+        };
+
+        window.renderChatModal = () => {
+            const modalContainer = document.getElementById('modal-container');
+            if (!activeChat) {
+                closeModal();
+                return;
+            }
+            const modal = document.createElement('div');
+            modal.id = 'chat-modal';
+            modal.className = 'fixed inset-0 bg-black bg-opacity-70 overflow-y-auto h-full w-full flex items-center justify-center z-50';
+            modal.innerHTML = `
+                <div class="relative p-6 bg-white w-full max-w-lg m-4 rounded-lg shadow-md flex flex-col h-[80%] md:h-[60%]">
+                    <div class="flex justify-between items-center pb-3 border-b-2 mb-4">
+                        <h2 class="text-xl font-bold text-green-600">Chat sobre: ${activeChat?.type}</h2>
+                        <button onclick="closeModal()" class="text-2xl text-gray-500 hover:text-gray-800 transition-colors">&times;</button>
+                    </div>
+                    <div id="chat-messages-content" class="flex-grow overflow-y-auto custom-scrollbar space-y-4 mb-4 p-2">
+                        ${chatMessages.length === 0 ? `<p class="text-center text-gray-500">Nenhuma mensagem ainda. Inicie a conversa!</p>` : chatMessages.map(msg => `
+                            <div class="flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'}">
+                                <div class="p-3 rounded-lg max-w-[75%] break-words ${msg.senderId === userId ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-800'}">
+                                    ${msg.text}
+                                    <p class="text-xs mt-1 text-right ${msg.senderId === userId ? 'text-blue-200' : 'text-gray-500'}">
+                                        ${new Date(msg.timestamp?.seconds * 1000).toLocaleTimeString()}
+                                    </p>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <form id="chat-form" class="flex space-x-2 mt-4" onsubmit="handleSendMessage(event)">
+                        <input type="text" id="new-message-text" placeholder="Digite sua mensagem..." class="flex-grow p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"/>
+                        <button type="submit" class="bg-green-600 text-white p-3 rounded-lg font-semibold hover:bg-green-700 transition-colors">
+                            Enviar
+                        </button>
+                    </form>
+                </div>
+            `;
+            modalContainer.innerHTML = '';
+            modalContainer.appendChild(modal);
+
+            const messagesContainer = document.getElementById('chat-messages-content');
+            if (messagesContainer) {
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+        };
+
+        window.renderUserTypeSelector = () => {
+            const appContainer = document.getElementById('app-container');
+            appContainer.innerHTML = `
+                <div class="min-h-screen p-4 md:p-8 flex flex-col items-center justify-center font-sans">
+                    <div class="w-full max-w-sm bg-white p-8 rounded-lg shadow-md text-center">
+                        <h1 class="text-2xl font-bold mb-6 text-green-600">Escolha seu Perfil</h1>
+                        <p class="text-gray-600 mb-6">
+                            Para usar o reUse, selecione como você interage com os materiais.
+                        </p>
+                        <div class="space-y-4">
+                            <button onclick="handleSetUserType('Doador')" class="w-full bg-green-600 text-white p-4 rounded-lg font-bold hover:bg-green-700 transition-colors transform hover:scale-105 shadow-md">
+                                Sou um Doador
+                            </button>
+                            <button onclick="handleSetUserType('Coletor')" class="w-full bg-blue-600 text-white p-4 rounded-lg font-bold hover:bg-blue-700 transition-colors transform hover:scale-105 shadow-md">
+                                Sou um Coletor
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+        
+        // Função para obter dados de material do config
+        window.getMaterialConfig = (materialType) => materialPointsConfig[materialType.toLowerCase()] || { points: 5, carbonSavedPerKg: 1 };
+
+        // Função para inicializar o banco de dados
+        async function initializeDatabase() {
+            console.log("Verificando se o banco de dados precisa ser inicializado...");
+
+            const materialsCollectionRef = collection(db, `artifacts/${appId}/public/data/materialPoints`);
+            const rewardsCollectionRef = collection(db, `artifacts/${appId}/public/data/rewards`);
+            
+            const materialPointsSnapshot = await getDocs(materialsCollectionRef);
+            if (materialPointsSnapshot.empty) {
+                console.log("Coleção de tipos de materiais vazia. Adicionando dados iniciais.");
+                const initialMaterials = [
+                    { name: 'plastico', points: 10, carbonSavedPerKg: 1.8 },
+                    { name: 'vidro', points: 15, carbonSavedPerKg: 0.3 },
+                    { name: 'metal', points: 20, carbonSavedPerKg: 2.2 },
+                    { name: 'papel', points: 5, carbonSavedPerKg: 0.7 },
+                ];
+                for (const material of initialMaterials) {
+                    const materialRef = doc(materialsCollectionRef, material.name);
+                    await setDoc(materialRef, { points: material.points, carbonSavedPerKg: material.carbonSavedPerKg });
+                }
+                console.log("Tipos de materiais iniciais adicionados.");
+            } else {
+                console.log("Coleção de tipos de materiais já existe. Pulando a inicialização.");
+            }
+
+            const rewardsSnapshot = await getDocs(rewardsCollectionRef);
+            if (rewardsSnapshot.empty) {
+                console.log("Coleção de recompensas vazia. Adicionando dados iniciais.");
+                const initialRewards = [
+                    { name: 'Cupom de Café (10% de Desconto)', points: 50 },
+                    { name: 'Desconto em Loja Local (R$20)', points: 100 },
+                    { name: 'Sorteio de Cesta Sustentável', points: 200 },
+                ];
+                for (const reward of initialRewards) {
+                    await addDoc(rewardsCollectionRef, reward);
+                }
+                console.log("Recompensas iniciais adicionadas.");
+            } else {
+                console.log("Coleção de recompensas já existe. Pulando a inicialização.");
+            }
+        }
+        
+        // Listener de autenticação para iniciar a aplicação
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                userId = user.uid;
+                const userProfileRef = doc(db, `artifacts/${appId}/users/${user.uid}/profile`, "data");
+                const docSnap = await getDoc(userProfileRef);
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    userType = data.userType;
+                    points = data.points || 0;
+                    carbonSaved = data.carbonSaved || 0;
+                } else {
+                    userType = null;
+                    points = 0;
+                    carbonSaved = 0;
+                }
+            } else {
+                userId = null;
+                userType = null;
+                points = 0;
+                carbonSaved = 0;
+            }
+            isAuthReady = true;
+            renderHeader();
+            renderApp();
+        });
+
+        // Executa a inicialização do banco de dados quando o DOM estiver pronto
+        document.addEventListener('DOMContentLoaded', async () => {
+            setupListeners();
+            await initializeDatabase(); 
+            if (!userId) {
+                renderLoginPage();
+            }
+        });
+    </script>
+</body>
+</html>
